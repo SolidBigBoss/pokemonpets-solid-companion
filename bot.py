@@ -38,7 +38,7 @@ def save_capture_log(data: dict):
 # ============================================================
 async def get_game_state(page) -> dict:
     """Lê o DOM e retorna o estado atual do jogo."""
-    return await page.evaluate("""
+    return await page.evaluate(r"""
     () => {
         const exists = (sel) => !!document.querySelector(sel);
         const visible = (sel) => {
@@ -57,16 +57,21 @@ async def get_game_state(page) -> dict:
         const notCapturedPopup = !!document.querySelector('.jconfirm-scrollpane') &&
             /not captured/i.test(document.querySelector('.jconfirm-scrollpane')?.innerText || '');
 
-        // 4. Tela de batalha
-        const inBattle = !!document.querySelector("input[whichbutton='1']") &&
-            document.querySelector("input[whichbutton='1']")?.offsetParent !== null;
-
         // 5. Tela de seleção de pokemon
-        const inPokemonSelect = exists('#btnSelectMonster') &&
-            !inBattle &&
+        // OBS: o botão #btnSelectMonster (escolher qual pokemon vai pra batalha)
+        // também usa whichbutton="1", igual aos botões de move na batalha real.
+        // Por isso a presença de #btnSelectMonster sempre indica essa tela,
+        // nunca a batalha em si — precisa ser checado ANTES do inBattle.
+        const hasSelectMonsterBtn = exists('#btnSelectMonster');
+        const inPokemonSelect = hasSelectMonsterBtn &&
             !notCapturedPopup &&
             !battleFinished &&
             !rewardsPage;
+
+        // 4. Tela de batalha
+        const inBattle = !hasSelectMonsterBtn &&
+            !!document.querySelector("input[whichbutton='1']") &&
+            document.querySelector("input[whichbutton='1']")?.offsetParent !== null;
 
         // 6. Frame de pokemon já capturado
         const encounterButtons = !!document.querySelector('#btnFightPokemon2') && !notCapturedPopup;
@@ -77,13 +82,20 @@ async def get_game_state(page) -> dict:
         const levelMatch = popupText.match(/Level:\s*(\d+)/i);
         const classMatch = popupText.match(/Class:\s*(\S+)/i);
 
-        // Moves na batalha
+        // Moves na batalha (com efetividade contra o pokemon inimigo, ex: 0x, 0.5x, 1x)
+        // O div .effectiveXX fica como irmão do botão, dentro do mesmo container.
         const moveButtons = Array.from(document.querySelectorAll("input[whichbutton]"))
-            .map(el => ({
-                position: el.getAttribute('whichbutton'),
-                name: el.value,
-                visible: el.offsetParent !== null
-            }));
+            .map(el => {
+                const effEl = el.parentElement?.querySelector('[class^="effective"]');
+                const effText = effEl?.innerText?.trim() || '';
+                const effMatch = effText.match(/([\d.]+)x/i);
+                return {
+                    position: el.getAttribute('whichbutton'),
+                    name: el.value,
+                    visible: el.offsetParent !== null,
+                    effectiveness: effMatch ? parseFloat(effMatch[1]) : null,
+                };
+            });
 
         // HP do inimigo
         const enemyHpEl = document.querySelector('.EnemyHP, [id*="EnemyHP"], [class*="EnemyHP"]');
@@ -91,6 +103,10 @@ async def get_game_state(page) -> dict:
 
         // Detecta mensagem de captura bem sucedida
         const captureSuccess = /successfully captured/i.test(document.body.innerText);
+
+        // Estado do Auto Hunting (mesmo botão, muda o ícone conforme liga/desliga)
+        const autoHuntImg = document.querySelector('#imgBtnEnableAutoHunt');
+        const autoHuntEnabled = autoHuntImg ? /auto_hunt_enabled_icon/i.test(autoHuntImg.src) : null;
 
         // Determina estado atual
         let currentState = 'MAP';
@@ -109,6 +125,7 @@ async def get_game_state(page) -> dict:
             popupPokemonClass: classMatch?.[1] || '',
             moveButtons,
             enemyHpText,
+            autoHuntEnabled,
         };
     }
     """)
@@ -139,14 +156,34 @@ async def press_key(page, key: str, description: str = ""):
         return False
 
 
+async def get_selected_pokeball(page) -> str:
+    """Lê o nome da ball atualmente selecionada no título do dropdown
+    (removendo o prefixo numérico, ex: '1820-Poke Ball' -> 'Poke Ball').
+    Retorna string vazia/placeholder se nenhuma ball estiver selecionada."""
+    return await page.evaluate(r"""
+    () => {
+        const label = document.querySelector('#dropDownMonsterBoxes_title .ddlabel')?.innerText || '';
+        return label.replace(/^\d+-/, '').trim();
+    }
+    """)
+
+
 async def select_pokeball(page, ball_name: str):
     try:
-        await page.click("#dropDownMonsterBoxes_title", timeout=3000)
+        current = await get_selected_pokeball(page)
+        if current == ball_name:
+            log(f"Poké Ball '{ball_name}' já selecionada, pulando seleção.", "INFO")
+            return True
+
+        await page.click(SELECTORS["ball_dropdown_title"], timeout=3000)
         await asyncio.sleep(0.3)
         result = await page.evaluate(f"""
         () => {{
-            const items = Array.from(document.querySelectorAll('li'));
-            const target = items.find(el => el.innerText?.includes('{ball_name}'));
+            const items = Array.from(document.querySelectorAll('{SELECTORS["ball_dropdown_list"]}'));
+            const target = items.find(el => {{
+                const label = el.querySelector('.ddlabel')?.innerText || '';
+                return label.replace(/^\\d+-/, '').trim() === '{ball_name}';
+            }});
             if (target) {{ target.click(); return true; }}
             return false;
         }}
@@ -154,7 +191,7 @@ async def select_pokeball(page, ball_name: str):
         if result:
             log(f"Poké Ball selecionada: {ball_name}", "OK")
         else:
-            log(f"Ball '{ball_name}' não encontrada, usando padrão", "WARN")
+            log(f"Ball '{ball_name}' não encontrada no dropdown.", "WARN")
         return result
     except Exception as e:
         log(f"Erro ao selecionar ball: {e}", "WARN")
@@ -207,8 +244,19 @@ async def handle_battle(page, state: dict, session: dict):
 
     if moves_used == 0:
         if USE_FALSE_SWIPE_BEFORE_CAPTURE:
-            log("Usando False Swipe...", "ACTION")
-            await press_key(page, FALSE_SWIPE_POSITION, "False Swipe")
+            false_swipe = next(
+                (m for m in state.get("moveButtons", []) if m["position"] == FALSE_SWIPE_POSITION),
+                None,
+            )
+            effectiveness = false_swipe.get("effectiveness") if false_swipe else None
+
+            if effectiveness == 0:
+                log("False Swipe não tem efeito nesse pokémon (0x). Usando move alternativo...", "INFO")
+                await press_key(page, FALLBACK_MOVE_POSITION, "Move alternativo (False Swipe sem efeito)")
+            else:
+                log("Usando False Swipe...", "ACTION")
+                await press_key(page, FALSE_SWIPE_POSITION, "False Swipe")
+
             await asyncio.sleep(DELAYS["after_move"])
             pokemon["moves_used"] = 1
             session["current_pokemon"] = pokemon
@@ -244,7 +292,7 @@ async def handle_battle_finished(page, state: dict, session: dict):
 async def handle_rewards_page(page, state: dict):
     """Fecha tela de recompensas e volta ao mapa."""
     log("Fechando tela de recompensas...", "ACTION")
-    await click(page, 'a[href="gamepage.aspx"].buttonRed', "Return to Adventure")
+    await click(page, SELECTORS["btn_return_adventure"], "Return to Adventure")
     await asyncio.sleep(DELAYS["after_battle_end"])
 
 
@@ -253,6 +301,61 @@ async def handle_encounter(page, state: dict):
     log("Pokemon já capturado. Fugindo...", "INFO")
     await click(page, SELECTORS["btn_run"], "Try Run")
     await asyncio.sleep(DELAYS["after_battle_end"])
+
+
+async def handle_map(page, state: dict):
+    """No mapa: garante que o Auto Hunting está ativado."""
+    if state.get("autoHuntEnabled") is False:
+        log("Auto Hunting desativado. Ativando...", "ACTION")
+        await click(page, SELECTORS["auto_hunt_toggle"], "Ativar Auto Hunting")
+        await asyncio.sleep(DELAYS["after_click"])
+
+
+# ============================================================
+# LOGIN
+# ============================================================
+async def login_and_enter_game(page) -> bool:
+    """Faz login no PokemonPets e navega até o gamepage.aspx.
+
+    Fluxo: /Login -> preenche usuário/senha -> #btnLogin
+           -> (se cair em WelcomePage.aspx) clica no link "Game Page"
+           -> confirma que chegou no gamepage.aspx
+    Retorna True se conseguiu chegar no mapa do jogo, False caso contrário.
+    """
+    if not POKEMONPETS_USERNAME or not POKEMONPETS_PASSWORD:
+        log("Credenciais não encontradas no .env (POKEMONPETS_USERNAME / POKEMONPETS_PASSWORD).", "ERR")
+        return False
+
+    log("Navegando até a tela de login...", "ACTION")
+    await page.goto(LOGIN_URL)
+    await asyncio.sleep(1.0)
+
+    try:
+        await page.fill(SELECTORS["login_username"], POKEMONPETS_USERNAME, timeout=5000)
+        await page.fill(SELECTORS["login_password"], POKEMONPETS_PASSWORD, timeout=5000)
+        log("Credenciais preenchidas, efetuando login...", "ACTION")
+        await page.click(SELECTORS["login_submit"], timeout=5000)
+    except Exception as e:
+        log(f"Falha ao preencher/enviar formulário de login: {e}", "ERR")
+        return False
+
+    await asyncio.sleep(2.0)
+
+    if WELCOME_URL_FRAGMENT in page.url:
+        log("Login OK, na página de boas-vindas. Indo para o mapa...", "OK")
+        try:
+            await page.click(SELECTORS["welcome_game_page_link"], timeout=5000)
+            await asyncio.sleep(2.0)
+        except Exception as e:
+            log(f"Falha ao clicar em 'Game Page': {e}", "ERR")
+            return False
+
+    if "gamepage.aspx" in page.url:
+        log("Chegou no mapa do jogo.", "OK")
+        return True
+
+    log(f"URL inesperada após tentativa de login: {page.url}", "WARN")
+    return False
 
 
 # ============================================================
@@ -293,8 +396,15 @@ async def main():
                 break
 
         if not page:
-            log("Aba do PokemonPets não encontrada!", "ERR")
-            return
+            log("Aba do PokemonPets não encontrada. Abrindo uma nova aba...", "INFO")
+            page = await context.new_page()
+
+        if "gamepage.aspx" not in page.url:
+            log("Ainda não está no mapa do jogo. Iniciando login automático...", "INFO")
+            logged_in = await login_and_enter_game(page)
+            if not logged_in:
+                log("Não foi possível logar/entrar no jogo. Abortando.", "ERR")
+                return
 
         log(f"Conectado: {page.url}", "OK")
         log("Bot iniciado! Ative o Auto Hunting no jogo.", "INFO")
@@ -336,7 +446,7 @@ async def main():
                     runs += 1
 
                 elif current == "MAP":
-                    pass
+                    await handle_map(page, state)
 
             except KeyboardInterrupt:
                 log("Bot encerrado pelo usuário.", "WARN")

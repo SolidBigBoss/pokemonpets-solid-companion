@@ -2,9 +2,25 @@
 # PokemonPets Bot - Configurações
 # ============================================================
 
+import os
+from dotenv import load_dotenv
+
+load_dotenv()  # carrega variáveis do arquivo .env (não versionado)
+
+# ============================================================
+# CREDENCIAIS (login automático)
+# ============================================================
+# Lidas do .env — NUNCA colocar usuário/senha direto aqui.
+POKEMONPETS_USERNAME = os.getenv("POKEMONPETS_USERNAME")
+POKEMONPETS_PASSWORD = os.getenv("POKEMONPETS_PASSWORD")
+
 # URL do jogo
 GAME_URL = "https://www.pokemonpets.com/gamepage.aspx"
+LOGIN_URL = "https://www.pokemonpets.com/Login"
 CDP_URL = "http://localhost:9222"
+
+# Fragmento de URL da página intermediária pós-login (antes de entrar no mapa)
+WELCOME_URL_FRAGMENT = "WelcomePage.aspx"
 
 # ============================================================
 # SELETORES DO DOM
@@ -32,9 +48,27 @@ SELECTORS = {
 
     # --- Auto Hunting ---
     "auto_hunt_div": ".AutoHunt.NiceText",
+    "auto_hunt_toggle": "#imgBtnEnableAutoHunt",
 
     # --- Detalhes do pokemon inimigo ---
     "btn_enemy_details": None,  # link com Wild=true
+
+    # --- Login ---
+    "login_username": "#ctl00_ContentPlaceHolder_txtUserName",
+    "login_password": "#ctl00_ContentPlaceHolder_txtPassword",
+    "login_submit": "#btnLogin",
+
+    # --- Página de boas-vindas (pós-login) ---
+    "welcome_game_page_link": 'a.myButtonGreen[href="gamepage.aspx"]',
+
+    # --- Dropdown de Poké Ball ---
+    "ball_dropdown_title": "#dropDownMonsterBoxes_title",
+    "ball_dropdown_list": "#dropDownMonsterBoxes_child li",
+
+    # --- Tela de recompensa (Obtained Rewards) ---
+    # :visible é extensão do próprio Playwright — existem 2 elementos com esse
+    # seletor na página (um oculto), então precisa filtrar pelo visível.
+    "btn_return_adventure": 'a[href="gamepage.aspx"].buttonRed:visible',
 }
 
 # ============================================================
@@ -70,6 +104,9 @@ DEFAULT_POKEBALL = "Poke Ball"
 # ============================================================
 # TIPOS QUE NÃO SÃO AFETADOS POR FALSE SWIPE
 # ============================================================
+# OBSOLETO: substituído pela checagem dinâmica de efetividade (0x) lida
+# direto da tela de batalha em bot.py/handle_battle(). Mantido só de referência
+# — mais confiável que uma lista fixa, já que o jogo tem fusões/fakemon.
 GHOST_IMMUNE_TO_FALSE_SWIPE = ["Ghost"]
 
 # Move fallback para Ghost types (posição do botão)
