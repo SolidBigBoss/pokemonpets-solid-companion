@@ -3,11 +3,10 @@
 # ============================================================
 
 import asyncio
-import json
-import os
 from datetime import datetime
 from playwright.async_api import async_playwright
 from config import *
+import db
 
 
 # ============================================================
@@ -18,19 +17,6 @@ def log(msg: str, level: str = "INFO"):
     icons = {"INFO": "ℹ️", "OK": "✅", "WARN": "⚠️", "ERR": "❌", "ACTION": "🎮"}
     icon = icons.get(level, "•")
     print(f"[{timestamp}] {icon} {msg}")
-
-
-def save_capture_log(data: dict):
-    """Salva histórico de capturas em JSON, separado por dia (logs/captures/AAAA-MM-DD.json)."""
-    os.makedirs(LOG_DIR, exist_ok=True)
-    log_file = os.path.join(LOG_DIR, f"{datetime.now().strftime('%Y-%m-%d')}.json")
-    logs = []
-    if os.path.exists(log_file):
-        with open(log_file, "r") as f:
-            logs = json.load(f)
-    logs.append({**data, "timestamp": datetime.now().isoformat()})
-    with open(log_file, "w") as f:
-        json.dump(logs, f, indent=2)
 
 
 # ============================================================
@@ -58,11 +44,15 @@ async def get_game_state(page) -> dict:
             /not captured/i.test(document.querySelector('.jconfirm-scrollpane')?.innerText || '');
 
         // 5. Tela de seleção de pokemon
-        // OBS: o botão #btnSelectMonster (escolher qual pokemon vai pra batalha)
-        // também usa whichbutton="1", igual aos botões de move na batalha real.
-        // Por isso a presença de #btnSelectMonster sempre indica essa tela,
-        // nunca a batalha em si — precisa ser checado ANTES do inBattle.
-        const hasSelectMonsterBtn = exists('#btnSelectMonster');
+        // OBS: o id #btnSelectMonster é reaproveitado em DOIS contextos diferentes:
+        //   - Tela de escolha de qual pokemon vai pra batalha: tem o atributo whichbutton="1".
+        //   - Dentro da batalha real, como botão "Switch Pokémon" (trocar de pokemon
+        //     no meio do combate): mesmo id, mas SEM o atributo whichbutton.
+        // Por isso exigimos o atributo whichbutton pra considerar que é de fato
+        // a tela de seleção — só checar exists('#btnSelectMonster') (sem o atributo)
+        // fazia o bot confundir batalha real com tela de seleção (bug confirmado
+        // em 05/07: estado nunca virava BATTLE, sempre POKEMON_SELECT).
+        const hasSelectMonsterBtn = !!document.querySelector('#btnSelectMonster[whichbutton]');
         const inPokemonSelect = hasSelectMonsterBtn &&
             !notCapturedPopup &&
             !battleFinished &&
@@ -104,6 +94,12 @@ async def get_game_state(page) -> dict:
         // Detecta mensagem de captura bem sucedida
         const captureSuccess = /successfully captured/i.test(document.body.innerText);
 
+        // Mensagem de falha do jogo (ex: "Please select a Poké Ball first
+        // before trying to catch a Pokémon!", quando o arremesso é feito sem
+        // a ball estar de fato selecionada do lado do servidor).
+        const failEl = document.querySelector('.FailMessage');
+        const failMessage = failEl?.innerText?.trim() || '';
+
         // Estado do Auto Hunting (mesmo botão, muda o ícone conforme liga/desliga)
         const autoHuntImg = document.querySelector('#imgBtnEnableAutoHunt');
         const autoHuntEnabled = autoHuntImg ? /auto_hunt_enabled_icon/i.test(autoHuntImg.src) : null;
@@ -126,6 +122,7 @@ async def get_game_state(page) -> dict:
             moveButtons,
             enemyHpText,
             autoHuntEnabled,
+            failMessage,
         };
     }
     """)
@@ -168,46 +165,159 @@ async def get_selected_pokeball(page) -> str:
     """)
 
 
-async def select_pokeball(page, ball_name: str):
-    try:
-        current = await get_selected_pokeball(page)
-        if current == ball_name:
-            log(f"Poké Ball '{ball_name}' já selecionada, pulando seleção.", "INFO")
-            return True
+async def select_pokeball(page, ball_name: str) -> bool:
+    """Abre o dropdown e seleciona a ball pelo nome.
 
+    Duas mudanças importantes feitas em 08/07 (bug: dropdown abria mas a ball
+    não era de fato selecionada, resultando no erro do jogo "Please select a
+    Poké Ball first..."):
+    1. Removido o atalho de "já selecionada, pulando seleção" — o rótulo do
+       dropdown pode ficar com o valor de um encontro anterior mesmo que a
+       seleção real (do lado do jogo) já tenha sido resetada.
+    2. O clique agora é um clique REAL do Playwright no <li> (via locator),
+       em vez de `element.click()` disparado dentro de um `page.evaluate` —
+       o clique sintético nem sempre aciona o handler do plugin de dropdown
+       do jogo.
+    """
+    try:
         await page.click(SELECTORS["ball_dropdown_title"], timeout=3000)
         await asyncio.sleep(0.3)
-        result = await page.evaluate(f"""
+
+        index = await page.evaluate(f"""
         () => {{
             const items = Array.from(document.querySelectorAll('{SELECTORS["ball_dropdown_list"]}'));
-            const target = items.find(el => {{
+            return items.findIndex(el => {{
                 const label = el.querySelector('.ddlabel')?.innerText || '';
                 return label.replace(/^\\d+-/, '').trim() === '{ball_name}';
             }});
-            if (target) {{ target.click(); return true; }}
-            return false;
         }}
         """)
-        if result:
-            log(f"Poké Ball selecionada: {ball_name}", "OK")
-        else:
+
+        if index is None or index < 0:
             log(f"Ball '{ball_name}' não encontrada no dropdown.", "WARN")
-        return result
+            return False
+
+        await page.locator(SELECTORS["ball_dropdown_list"]).nth(index).click(timeout=3000)
+        await asyncio.sleep(0.3)
+
+        confirmed = await get_selected_pokeball(page)
+        if confirmed == ball_name:
+            log(f"Poké Ball selecionada: {ball_name}", "OK")
+            return True
+
+        log(f"Cliquei em '{ball_name}', mas o dropdown mostra '{confirmed}'. Seleção pode não ter sido aplicada.", "WARN")
+        return False
     except Exception as e:
         log(f"Erro ao selecionar ball: {e}", "WARN")
         return False
 
 
-async def throw_pokeball(page, ball_name: str):
-    await select_pokeball(page, ball_name)
+async def throw_pokeball(page, ball_name: str) -> bool:
+    """Seleciona a ball e arremessa. Retorna se a seleção foi confirmada antes
+    do arremesso (não garante que o arremesso em si teve sucesso — isso é
+    checado depois via o campo `failMessage` do estado, no próximo ciclo)."""
+    selected = await select_pokeball(page, ball_name)
+    if not selected:
+        log("Seleção da ball não confirmada. Tentando arremessar mesmo assim...", "WARN")
     await asyncio.sleep(0.3)
     await click(page, SELECTORS["btn_throw_ball"], "Throw Poké Ball")
     await asyncio.sleep(DELAYS["after_ball"])
+    return selected
 
 
 def choose_pokeball(stars: int) -> str:
     balls = POKEBALL_BY_STARS.get(stars, [DEFAULT_POKEBALL])
     return balls[0]
+
+
+def choose_best_damaging_move(move_buttons: list, exclude_position: str):
+    """Escolhe, entre os moves visíveis (exceto `exclude_position`), o de maior
+    efetividade não-zero contra o pokémon atual. Retorna None se nenhum servir."""
+    candidates = [
+        m for m in move_buttons
+        if m.get("position") != exclude_position
+        and m.get("visible")
+        and m.get("effectiveness") not in (None, 0)
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda m: m["effectiveness"])
+
+
+# ============================================================
+# SCRAPE - DADOS GERAIS DA ESPÉCIE (fonte 3, só consultado, nunca salvo em cache)
+# ============================================================
+async def get_enemy_pokedex_url(page) -> str:
+    """Lê a URL da página do Pokédex do pokémon inimigo, a partir do link
+    na imagem dele na tela de batalha."""
+    return await page.evaluate(f"""
+    () => {{
+        const img = document.querySelector('{SELECTORS["enemy_pokedex_image"]}');
+        const link = img?.closest('a');
+        return link?.href || '';
+    }}
+    """)
+
+
+async def scrape_species_details(context, pokedex_url: str) -> dict:
+    """Abre a página do Pokédex da espécie numa aba nova, extrai tipo, raridade,
+    catch rate e stats base, e fecha a aba. Não persiste nada aqui — só retorna
+    os dados pra uso imediato na decisão do turno e, se capturar, no registro final."""
+    if not pokedex_url:
+        return {}
+
+    details = {}
+    tab = await context.new_page()
+    try:
+        await tab.goto(pokedex_url, timeout=15000)
+        details = await tab.evaluate(r"""
+        () => {
+            const findCell = (label) => Array.from(document.querySelectorAll('td'))
+                .find(td => td.textContent.trim().startsWith(label));
+
+            const rarityCell = findCell('Class:');
+            const rarityClass = rarityCell
+                ? rarityCell.textContent.replace('Class:', '').trim().split('\n')[0].trim()
+                : null;
+
+            const typeCell = findCell('Type:');
+            const type = typeCell?.querySelector('.InlineBlock')?.textContent?.trim() || null;
+
+            const catchRateCell = findCell('Catch Rate:');
+            const catchRateMatch = catchRateCell?.textContent.match(/Catch Rate:\s*(\d+)/);
+            const catchRate = catchRateMatch ? parseInt(catchRateMatch[1]) : null;
+
+            const idCell = findCell('Pokemon Id:');
+            const speciesIdMatch = idCell?.textContent.match(/Pokemon Id:\s*(\d+)/);
+            const speciesId = speciesIdMatch ? parseInt(speciesIdMatch[1]) : null;
+
+            const getStat = (label) => {
+                const cell = findCell(label + ':');
+                const match = cell?.textContent.match(new RegExp(label + ':\\s*(\\d+)'));
+                return match ? parseInt(match[1]) : null;
+            };
+
+            return {
+                rarityClass,
+                type,
+                catchRate,
+                speciesId,
+                baseHp: getStat('HP'),
+                baseAttack: getStat('Attack'),
+                baseDefense: getStat('Defense'),
+                baseSpAttack: getStat('SpAttack'),
+                baseSpDefense: getStat('SpDefense'),
+                baseSpeed: getStat('Speed'),
+                baseTotal: getStat('Total'),
+            };
+        }
+        """)
+    except Exception as e:
+        log(f"Erro ao raspar detalhes da espécie ({pokedex_url}): {e}", "WARN")
+    finally:
+        await tab.close()
+
+    return details
 
 
 # ============================================================
@@ -242,25 +352,62 @@ async def handle_battle(page, state: dict, session: dict):
     pokemon = session.get("current_pokemon", {})
     moves_used = pokemon.get("moves_used", 0)
 
+    # Na primeira vez que entramos nessa batalha, busca os dados gerais da
+    # espécie (fonte 3: tipo, catch rate, stats base). Só uma vez por encontro.
+    if not pokemon.get("species_fetched"):
+        pokedex_url = await get_enemy_pokedex_url(page)
+        details = await scrape_species_details(page.context, pokedex_url)
+        pokemon["species_details"] = details
+        pokemon["species_fetched"] = True
+        session["current_pokemon"] = pokemon
+        if details.get("type"):
+            log(f"Espécie: {details.get('type')} | Catch Rate: {details.get('catchRate')}", "INFO")
+
     if moves_used == 0:
         if USE_FALSE_SWIPE_BEFORE_CAPTURE:
+            # Busca o move "False Swipe" pelo NOME, não por posição fixa — a posição
+            # (whichbutton) depende de qual pokemon do time está batalhando, então
+            # não é confiável assumir que está sempre no mesmo slot.
             false_swipe = next(
-                (m for m in state.get("moveButtons", []) if m["position"] == FALSE_SWIPE_POSITION),
+                (m for m in state.get("moveButtons", [])
+                 if m.get("name", "").strip().lower() == "false swipe"),
                 None,
             )
-            effectiveness = false_swipe.get("effectiveness") if false_swipe else None
 
-            if effectiveness == 0:
-                log("False Swipe não tem efeito nesse pokémon (0x). Usando move alternativo...", "INFO")
-                await press_key(page, FALLBACK_MOVE_POSITION, "Move alternativo (False Swipe sem efeito)")
+            if false_swipe is None:
+                log("Move 'False Swipe' não encontrado no time atual. Usando o melhor move disponível.", "WARN")
+                fallback = choose_best_damaging_move(state.get("moveButtons", []), exclude_position=None)
+                if fallback:
+                    await press_key(page, fallback["position"], f"Move alternativo: {fallback['name']}")
+                else:
+                    log("Nenhum move com efeito encontrado. Usando fallback fixo.", "WARN")
+                    await press_key(page, FALLBACK_MOVE_POSITION, "Move alternativo (fallback fixo)")
             else:
-                log("Usando False Swipe...", "ACTION")
-                await press_key(page, FALSE_SWIPE_POSITION, "False Swipe")
+                effectiveness = false_swipe.get("effectiveness")
+                if effectiveness == 0:
+                    fallback = choose_best_damaging_move(state.get("moveButtons", []), false_swipe["position"])
+                    if fallback:
+                        log(f"False Swipe sem efeito (0x). Usando '{fallback['name']}' ({fallback['effectiveness']}x)...", "INFO")
+                        await press_key(page, fallback["position"], f"Move alternativo: {fallback['name']}")
+                    else:
+                        log("False Swipe sem efeito e nenhum move alternativo com efeito encontrado. Usando fallback fixo.", "WARN")
+                        await press_key(page, FALLBACK_MOVE_POSITION, "Move alternativo (fallback fixo)")
+                else:
+                    log("Usando False Swipe...", "ACTION")
+                    await press_key(page, false_swipe["position"], "False Swipe")
 
             await asyncio.sleep(DELAYS["after_move"])
             pokemon["moves_used"] = 1
             session["current_pokemon"] = pokemon
             return
+
+    # Se o arremesso anterior falhou por falta de seleção real da ball
+    # (mensagem do próprio jogo), corrige a contagem (não foi uma ball de
+    # verdade usada) antes de tentar de novo.
+    fail_message = state.get("failMessage", "")
+    if fail_message and "select a poké ball" in fail_message.lower():
+        log(f"Arremesso anterior falhou (\"{fail_message}\"). Corrigindo contagem e tentando de novo...", "WARN")
+        pokemon["balls_used"] = max(0, pokemon.get("balls_used", 0) - 1)
 
     stars = 1  # TODO: pegar do scraper futuramente
     ball = choose_pokeball(stars)
@@ -276,12 +423,22 @@ async def handle_battle_finished(page, state: dict, session: dict):
 
     if state.get("captureSuccess"):
         log(f"✨ Capturado: {pokemon.get('name', '?')} com {pokemon.get('balls_used', '?')} ball(s)!", "OK")
-        save_capture_log({
-            "pokemon": pokemon.get("name"),
+        details = pokemon.get("species_details") or {}
+        db.save_captured_pokemon({
+            "pokemon_name": pokemon.get("name"),
+            "pokemon_species_id": details.get("speciesId"),
             "level": pokemon.get("level"),
-            "class": pokemon.get("class"),
+            "rarity_class": details.get("rarityClass") or pokemon.get("class"),
+            "type": details.get("type"),
+            "catch_rate": details.get("catchRate"),
+            "base_hp": details.get("baseHp"),
+            "base_attack": details.get("baseAttack"),
+            "base_defense": details.get("baseDefense"),
+            "base_spattack": details.get("baseSpAttack"),
+            "base_spdefense": details.get("baseSpDefense"),
+            "base_speed": details.get("baseSpeed"),
+            "base_total": details.get("baseTotal"),
             "balls_used": pokemon.get("balls_used", 0),
-            "result": "captured"
         })
 
     log("Avançando batalha (tecla F)...", "ACTION")
@@ -385,6 +542,8 @@ async def wait_for_browser(p, url: str):
 # LOOP PRINCIPAL
 # ============================================================
 async def main():
+    db.init_db()
+
     async with async_playwright() as p:
         browser = await wait_for_browser(p, CDP_URL)
         context = browser.contexts[0]
@@ -399,12 +558,26 @@ async def main():
             log("Aba do PokemonPets não encontrada. Abrindo uma nova aba...", "INFO")
             page = await context.new_page()
 
-        if "gamepage.aspx" not in page.url:
-            log("Ainda não está no mapa do jogo. Iniciando login automático...", "INFO")
+        # Só dispara o login se a aba NÃO estiver no domínio do jogo, ou estiver
+        # especificamente na tela de login/welcome. Antes checávamos apenas
+        # "gamepage.aspx not in url", o que derrubava batalhas em andamento: se
+        # o bot reiniciasse com a aba em BattleWildMonster.aspx (ou qualquer
+        # outra página válida do jogo), ele achava que não estava logado e
+        # navegava pra /Login, perdendo o estado da batalha. Corrigido em 08/07
+        # após o Boss reiniciar o bot no meio de um combate.
+        login_url_path = LOGIN_URL.rsplit("/", 1)[-1].lower()
+        on_pokemonpets_domain = "pokemonpets" in page.url.lower()
+        on_login_or_welcome = (login_url_path in page.url.lower()) or (WELCOME_URL_FRAGMENT in page.url)
+        needs_login = (not on_pokemonpets_domain) or on_login_or_welcome
+
+        if needs_login:
+            log("Login necessário (aba fora do jogo ou na tela de login/welcome)...", "INFO")
             logged_in = await login_and_enter_game(page)
             if not logged_in:
                 log("Não foi possível logar/entrar no jogo. Abortando.", "ERR")
                 return
+        else:
+            log(f"Já em uma página do jogo ({page.url}). Pulando login.", "INFO")
 
         log(f"Conectado: {page.url}", "OK")
         log("Bot iniciado! Ative o Auto Hunting no jogo.", "INFO")

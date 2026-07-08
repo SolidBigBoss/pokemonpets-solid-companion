@@ -69,6 +69,11 @@ SELECTORS = {
     # :visible é extensão do próprio Playwright — existem 2 elementos com esse
     # seletor na página (um oculto), então precisa filtrar pelo visível.
     "btn_return_adventure": 'a[href="gamepage.aspx"].buttonRed:visible',
+
+    # --- Link do Pokédex do inimigo (dentro da tela de batalha) ---
+    # A imagem do pokémon inimigo é um <a> que aponta pra página da espécie
+    # no Pokédex (ex: /Trubbish-Pokemon-Pokedex-568).
+    "enemy_pokedex_image": "#MonsterImageUser2",
 }
 
 # ============================================================
@@ -141,12 +146,15 @@ MIN_STARS_TO_CAPTURE = 2
 # Sempre usar False Swipe antes de jogar a ball?
 USE_FALSE_SWIPE_BEFORE_CAPTURE = True
 
-# Posição do False Swipe no time atual
+# OBSOLETO: substituído pela busca dinâmica do move "False Swipe" pelo NOME
+# (bot.py/handle_battle()), já que a posição (whichbutton) varia conforme o
+# pokemon do time em batalha. Mantido só de referência histórica.
 FALSE_SWIPE_POSITION = "4"
 
 # ============================================================
 # LOGGING
 # ============================================================
-# Pasta onde os logs de captura são salvos, um arquivo JSON por dia
-# (ex: logs/captures/2026-07-04.json), gerado automaticamente pelo bot.py.
-LOG_DIR = "logs/captures"
+# OBSOLETO: os registros de captura agora vão pro banco SQLite (db.py,
+# arquivo pokemonpets_bot.db), não mais em JSON por dia. Mantido comentado
+# só de referência histórica.
+# LOG_DIR = "logs/captures"
