@@ -52,8 +52,8 @@ git push
 - Devlog do projeto (o que foi feito em cada dia): `logs/devlog/AAAA-MM-DD.md`
 - Fluxo/arquitetura atual do bot (sempre atualizado): `fluxo-atual.md`
 - Pokémons capturados (banco SQLite, gerado automaticamente): `pokemonpets_bot.db` — ver seção 6 abaixo pra acessar
-- Configurações, seletores, hotkeys, delays: `config.py`
-- Lógica principal do bot: `bot.py`
+- Configurações, seletores, hotkeys, delays, thresholds: `config.py`
+- Handlers de estado e loop principal: `bot.py` (reorganizado em módulos em 08/07 — ver `fluxo-atual.md` seção 7/8 pra saber onde fica cada coisa: `state.py`, `actions.py`, `scraping.py`, `auth.py`, `logger.py`)
 - Credenciais de login: `.env` (nunca commitar)
 
 ## 6. Acessar o banco de dados (SQLite) — ver pokémons capturados
@@ -89,6 +89,6 @@ O bot fica em loop esperando a porta abrir — não precisa reiniciar ele, só a
 
 ## 8. Pendências conhecidas (ver devlog para detalhes)
 
-- Lógica de decisão de combate por HP (False Swipe até ≤10%, repetir se curar acima de 30%).
 - Raridade real (`stars`) ainda fixa em 1 no `choose_pokeball` — não usa o scrape da espécie pra decidir a ball certa.
 - Fonte 2 (popup "Show Pokémon's Details" com IV/EV/nature) ainda não implementada.
+- Testar em jogo real a lógica de fase attack/capture por HP (implementada em 08/07) e a reorganização em módulos (mesma sintaxe/comportamento, só reorganizado — mas ainda sem teste end-to-end pós-divisão).

@@ -50,41 +50,55 @@ Na primeira vez que entra em uma batalha (species_fetched == False):
     - Guarda esses dados na sessão (não persiste em cache, só usa nessa batalha
       e, se capturar, anexa ao registro salvo no final).
 
-Turno 1 (moves_used == 0):
-    - Localiza o move "False Swipe" pelo NOME (campo `name` de moveButtons),
-      não por posição fixa — a posição (whichbutton) varia conforme o
-      pokemon do time em batalha, então não é confiável assumir slot fixo.
-    - Se não achar nenhum move chamado "False Swipe": usa o melhor move
-      disponível (choose_best_damaging_move, sem exclusão), com fallback
-      fixo (FALLBACK_MOVE_POSITION) como último recurso.
-    - Se achar: olha a efetividade dele (lida do div .effectiveXX ao lado
-      do botão). Se 0x (sem efeito): usa o melhor move alternativo entre os
-      demais (choose_best_damaging_move, excluindo a posição do False Swipe).
-      Senão: usa o False Swipe.
-    - Marca moves_used = 1 e para o turno (não joga ball ainda).
+A cada turno, lê enemyHpPercent (HP % do inimigo, ver seção 3.1) e decide
+entre atacar ou capturar por FASE (não mais por número fixo de turnos):
 
-A partir do turno 2 em diante:
-    - Se o arremesso anterior falhou por falta de seleção real da ball
-      (campo `failMessage` do estado bate com "select a poké ball"), corrige
-      a contagem de balls_used (não foi uma ball de verdade usada) antes de
-      tentar de novo.
-    - Sempre joga a pokéball (nunca mais usa move).
-    - Ball escolhida por choose_pokeball(stars) — mas "stars" está fixo em 1
-      (TODO no código: ainda não lemos a raridade real do pokémon).
-    - select_pokeball() SEMPRE reabre o dropdown e clica na ball via clique
-      real do Playwright (não mais JS sintético), e confirma a seleção lendo
-      o título do dropdown depois do clique. Não pula mais a seleção mesmo se
-      já parecer selecionada (ver nota abaixo).
+    Fase "attack" (padrão inicial):
+        - Chama attack_move(): localiza o move "False Swipe" pelo NOME
+          (campo `name` de moveButtons, não por posição fixa — o whichbutton
+          varia conforme o pokemon do time em batalha). Se não achar, ou se
+          tiver 0x de efetividade, usa o melhor move alternativo disponível
+          (choose_best_damaging_move), com fallback fixo (FALLBACK_MOVE_POSITION)
+          como último recurso.
+        - Se enemy_hp <= HP_THRESHOLD_CAPTURE (10%): muda pra fase "capture"
+          ANTES de decidir a ação deste turno (ou seja, se já caiu pra ≤10%
+          logo depois do ataque anterior, esse turno já tenta a ball).
+
+    Fase "capture":
+        - Se o arremesso anterior falhou por falta de seleção real da ball
+          (campo `failMessage` bate com "select a poké ball"), corrige a
+          contagem de balls_used (não foi uma ball de verdade usada) antes
+          de tentar de novo.
+        - Joga a pokéball. Ball escolhida por choose_pokeball(stars) — mas
+          "stars" está fixo em 1 (TODO: ainda não lemos a raridade real).
+        - Se enemy_hp voltar a ficar acima de HP_THRESHOLD_REENGAGE (30%) —
+          ex: habilidade Regenerator/Natural Heal curando o inimigo — volta
+          pra fase "attack" no próximo turno.
+
+    Fallback (enemy_hp não pôde ser lido, ex: seletor não bateu): mantém o
+    comportamento antigo por segurança — ataca uma vez, depois só joga ball
+    pro resto do encontro (sem reavaliar HP).
+
+select_pokeball() SEMPRE reabre o dropdown e clica na ball via clique real do
+Playwright (não mais JS sintético), e confirma a seleção lendo o título do
+dropdown depois do clique. Não pula mais a seleção mesmo se já parecer
+selecionada (ver nota abaixo).
 ```
 
 **Nota sobre seleção de ball (bug corrigido em 08/07):** o rótulo do dropdown pode ficar "preso" mostrando a ball de um encontro anterior mesmo depois que o jogo já resetou a seleção real pro novo combate. O atalho antigo de "já selecionada, pulando" confiava só nesse rótulo visual e podia pular a seleção de verdade, causando o erro do jogo `"Please select a Poké Ball first before trying to catch a Pokémon!"` ao arremessar. Também trocamos o clique no `<li>` da lista — antes era `element.click()` disparado dentro de `page.evaluate` (nem sempre aciona o handler do plugin de dropdown do jogo), agora é um clique real do Playwright via `locator(...).click()`.
 
+### 3.1 Leitura do HP do inimigo (implementado em 08/07)
+
+`enemyHpPercent` é lido em `get_game_state()`: localiza a tabela que contém a imagem do inimigo (`#MonsterImageUser2`, mesma âncora usada pro link do Pokédex), acha a linha "HP:" dentro dela, e extrai o percentual do texto da `.StatBar` inteira via regex (o texto às vezes fica dentro do `<span class="HP">`, às vezes num `<span class="NotInRange">` irmão — pegar o texto todo cobre os dois casos sem depender de qual span exatamente).
+
+Thresholds em `config.py`: `HP_THRESHOLD_CAPTURE = 10` (entra em fase capture) e `HP_THRESHOLD_REENGAGE = 30` (volta pra fase attack se curar acima disso). A histerese entre os dois valores evita ficar oscilando toda vez que o HP flutua na faixa intermediária (10-30%).
+
+Motivação: existem ~207 habilidades no jogo (`https://www.pokemonpets.com/Abilities`), das quais 3 curam HP passivamente a cada turno (Natural Heal 5%, Regenerator 10%, Expert Regenerator 15%). Em vez de modelar cada habilidade, a decisão reage ao HP real observado a cada turno — funciona independente da causa da cura (habilidade, item, etc.).
+
 ### Limitações conhecidas (a resolver nas próximas sessões)
-- Não há leitura de **HP do pokémon inimigo** em uso real (existe o campo `enemyHpText` no estado, mas sem seletor confirmado nem lógica associada).
-- Não há decisão dinâmica de "usar False Swipe de novo x jogar ball" baseada em HP — hoje é sempre: 1 move no turno 1, ball a partir do turno 2, sem reavaliar.
-- Regra combinada de HP definida (mas não implementada): usar False Swipe até o pokémon ficar com ≤10% de HP; se ele se curar e passar de 30%, repetir o False Swipe antes de voltar a tentar a ball.
 - `stars` fixo em 1 no `choose_pokeball` — raridade real do pokémon nunca é usada pra escolher a ball certa (mesmo já tendo a raridade disponível via `species_details["rarityClass"]`, ainda não conectada a essa decisão).
 - "Classe" do popup Not Captured é raridade (Common/Rare/etc.), não tipo elemental — mas o tipo já é obtido separadamente pelo scrape da espécie (fonte 3).
+- Fase attack/capture ainda não testada em jogo real (implementada em 08/07, pendente de validação).
 
 ## 4. Scrape de dados do pokémon (implementado)
 - **Fonte 1 (dados ao vivo da batalha)**: lida direto do DOM em `get_game_state()` — HP, efetividade de cada move, etc. Muda a cada turno.
@@ -101,13 +115,31 @@ A partir do turno 2 em diante:
 - **Login automático**: `login_and_enter_game()` — ver seção 1.
 - **Auto Hunting**: detectado e ligado automaticamente pelo `handle_map()`.
 
-## 7. Onde mexer em cada coisa
-- Seletores, hotkeys, delays, credenciais: `config.py`
-- Toda a lógica/handlers: `bot.py`
+## 7. Organização do código (reorganizado em módulos em 08/07)
+
+`bot.py` estava com 619 linhas, misturando tudo. Dividido assim:
+
+- `config.py` — seletores, hotkeys, delays, credenciais, thresholds.
+- `logger.py` — só a função `log()`. Isolada porque todos os outros módulos precisam dela (evita import circular).
+- `state.py` — `get_game_state()`, toda a detecção de estado via DOM.
+- `actions.py` — `click`, `press_key`, `get_selected_pokeball`, `select_pokeball`, `throw_pokeball`, `choose_pokeball`, `choose_best_damaging_move`, `attack_move`.
+- `scraping.py` — `get_enemy_pokedex_url`, `scrape_species_details` (fonte 3, Pokédex da espécie).
+- `auth.py` — `login_and_enter_game`, `wait_for_browser`.
+- `db.py` — persistência SQLite (sem mudança).
+- `bot.py` — agora só os 7 `handle_*` e o `main()` (~265 linhas).
+
+## 8. Onde mexer em cada coisa
+- Seletores, hotkeys, delays, credenciais, thresholds: `config.py`
+- Detecção de estado: `state.py`
+- Ações de batalha (clique, tecla, ball, escolha de move): `actions.py`
+- Scrape da espécie (Pokédex): `scraping.py`
+- Login automático e conexão CDP: `auth.py`
+- Handlers de estado e loop principal: `bot.py`
+- Persistência: `db.py`
 - Passo a passo de execução (comandos, debug): `notas-execute.md`
 - Histórico dia a dia do que foi feito: `logs/devlog/AAAA-MM-DD.md`
 - Roadmap de fases futuras (Fase 2 em diante): `backlog.md`
 
-## 8. Regra de jogo — uma ação por turno
+## 9. Regra de jogo — uma ação por turno
 
 Em batalha, só dá pra executar **uma ação por turno**: usar um move, usar um item, ou trocar de pokémon são mutuamente exclusivos dentro do mesmo turno. Hoje isso não afeta a lógica atual (só usamos moves e ball, que já são turnos separados por natureza), mas será essencial nas Fases 3 e 4 do `backlog.md` (troca de pokémon e uso de itens) — precisa existir um controle de "ação já tomada nesse turno" pra não disparar duas ações no mesmo ciclo do loop.

@@ -151,6 +151,18 @@ USE_FALSE_SWIPE_BEFORE_CAPTURE = True
 # pokemon do time em batalha. Mantido só de referência histórica.
 FALSE_SWIPE_POSITION = "4"
 
+# ------------------------------------------------------------
+# Decisão por HP do inimigo (fase attack x capture, definido em 08/07)
+# ------------------------------------------------------------
+# Quando o HP do inimigo cair pra esse valor (%) ou menos, o bot para de
+# atacar e passa a jogar ball.
+HP_THRESHOLD_CAPTURE = 10
+
+# Se, depois de entrar em fase "capture", o HP do inimigo se recuperar (ex:
+# habilidades como Regenerator/Natural Heal) e ficar acima desse valor (%),
+# o bot volta a atacar com False Swipe antes de tentar a ball de novo.
+HP_THRESHOLD_REENGAGE = 30
+
 # ============================================================
 # LOGGING
 # ============================================================
