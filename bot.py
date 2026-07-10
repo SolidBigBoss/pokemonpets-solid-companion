@@ -7,6 +7,7 @@
 # scraping.py e auth.py pro resto. Detalhes em fluxo-atual.md.
 
 import asyncio
+import threading
 from playwright.async_api import async_playwright
 
 from config import *
@@ -171,7 +172,11 @@ async def handle_map(page, state: dict):
 # ============================================================
 # LOOP PRINCIPAL
 # ============================================================
-async def main():
+async def main(stop_event: threading.Event = None):
+    """stop_event é opcional — só usado quando o bot é iniciado pela HUD
+    (hud.py), rodando em background thread. Rodando direto via
+    `python bot.py`, ninguém passa esse parâmetro e o comportamento é o
+    mesmo de sempre (só Ctrl+C pra parar)."""
     db.init_db()
 
     async with async_playwright() as p:
@@ -219,6 +224,11 @@ async def main():
         runs = 0
 
         while True:
+            if stop_event and stop_event.is_set():
+                log("Bot interrompido (stop_event).", "WARN")
+                log(f"Capturas: {captures} | Fugas: {runs}", "INFO")
+                break
+
             try:
                 state = await get_game_state(page)
                 current = state["currentState"]
